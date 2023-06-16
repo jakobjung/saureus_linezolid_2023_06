@@ -4,11 +4,11 @@ main(){
     # sequences are stored:
     PROJECT=../data
     echo "Start trimming"
-    rename_trim_rna_libs
+    #rename_trim_rna_libs
     echo "Trimming done. Start mapping"
-    align_rna_reads_genome
+    #align_rna_reads_genome
     echo "Finished mapping. Start connecting all tab files"
-    featureCounts -T 5 -t CDS,sRNA,tRNA -g Name \
+    featureCounts -T 5 -t CDS,sRNA,tRNA,RNA -g Name \
 		  -a $PROJECT/reference_sequences/WG_with_sRNAs_Staphylococcus_aureus_101588.gff3\
 		  -o $PROJECT/rna_align/counttable.txt \
 		  $PROJECT/rna_align/*.bam
@@ -41,9 +41,9 @@ align_rna_reads_genome(){
         NAME=${i##*/}
         NAME=${NAME%_trimmed.fastq.gz}
         echo "Starting mapping for sample: $NAME"
-        bbmap.sh in=$i trimreaddescription=t  t=20 \
+        bbmap.sh in=$i trimreaddescription=t  t=20 ambiguous=all\
 			     ref=$PROJECT/reference_sequences/Staphylococcus_aureus_101588.fasta \
-			     k=12 outm=$DIR/$NAME.sam
+			     k=12 outm=$DIR/$NAME.sam 
         # sort sam file, create BAM file:
         samtools sort -O BAM -@ 40 $DIR/$NAME.sam > $DIR/$NAME.bam
         # remove sam file: (not actually needed)
@@ -52,8 +52,8 @@ align_rna_reads_genome(){
         samtools index $DIR/$NAME.bam
         # generate coverage statistics with bamcoverage:
         bamCoverage -b $DIR/$NAME.bam -o $DIR/$NAME.bw -bs 5
-	      fastqc $i
-	      rm $i
+	fastqc $i
+	rm $i
     done
 }
 

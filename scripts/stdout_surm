@@ -1,0 +1,47 @@
+ERROR: Unable to locate a modulefile for 'python'
+/var/spool/slurmd/job98002/slurm_script: line 10: activate: No such file or directory
+Start trimming
+Trimming done. Start mapping
+Finished mapping. Start connecting all tab files
+
+        ==========     _____ _    _ ____  _____  ______          _____  
+        =====         / ____| |  | |  _ \|  __ \|  ____|   /\   |  __ \ 
+          =====      | (___ | |  | | |_) | |__) | |__     /  \  | |  | |
+            ====      \___ \| |  | |  _ <|  _  /|  __|   / /\ \ | |  | |
+              ====    ____) | |__| | |_) | | \ \| |____ / ____ \| |__| |
+        ==========   |_____/ \____/|____/|_|  \_\______/_/    \_\_____/
+	  v2.0.0
+
+//========================== featureCounts setting ===========================\\
+||                                                                            ||
+||             Input files : 9 BAM files                                      ||
+||                           o LND_0_rep1.fq.gz.bam                           ||
+||                           o LND_0_rep2.fq.gz.bam                           ||
+||                           o LND_0_rep3.fq.gz.bam                           ||
+||                           o LND_16_rep1.fq.gz.bam                          ||
+||                           o LND_16_rep2.fq.gz.bam                          ||
+||                           o LND_16_rep3.fq.gz.bam                          ||
+||                           o LND_8_rep1.fq.gz.bam                           ||
+||                           o LND_8_rep2.fq.gz.bam                           ||
+||                           o LND_8_rep3.fq.gz.bam                           ||
+||                                                                            ||
+||             Output file : counttable.txt                                   ||
+||                 Summary : counttable.txt.summary                           ||
+||              Annotation : WG_with_sRNAs_Staphylococcus_aureus_101588.g ... ||
+||      Dir for temp files : ../data/rna_align                                ||
+||                                                                            ||
+||                 Threads : 5                                                ||
+||                   Level : meta-feature level                               ||
+||              Paired-end : no                                               ||
+||      Multimapping reads : not counted                                      ||
+|| Multi-overlapping reads : not counted                                      ||
+||   Min overlapping bases : 1                                                ||
+||                                                                            ||
+\\============================================================================//
+
+//================================= Running ==================================\\
+||                                                                            ||
+|| Load annotation file WG_with_sRNAs_Staphylococcus_aureus_101588.gff3 ...   ||
+ERROR: no features were loaded in format GTF. The annotation format can be specified by the '-F' option, and the required feature type can be specified by the '-t' option..
+The program has to terminate.
+
