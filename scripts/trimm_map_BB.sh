@@ -8,10 +8,20 @@ main(){
     echo "Trimming done. Start mapping"
     #align_rna_reads_genome
     echo "Finished mapping. Start connecting all tab files"
-    featureCounts -T 5 -t CDS,sRNA,tRNA,RNA -g Name \
-		  -a $PROJECT/reference_sequences/WG_with_sRNAs_Staphylococcus_aureus_101588.gff3\
-		  -o $PROJECT/rna_align/counttable.txt \
+    featureCounts -T 5 -t CDS,sRNA -g locus_tag \
+		  -a $PROJECT/reference_sequences/SA101588_prokka.gff\
+		  -o $PROJECT/rna_align/counttable_prokka.txt \
 		  $PROJECT/rna_align/*.bam
+    featureCounts -T 5 -t rRNA -g locus_tag \
+		  -a $PROJECT/reference_sequences/SA101588_prokka.gff\
+		  -o $PROJECT/rna_align/counttable_prokka_rRNAs.txt \
+		  $PROJECT/rna_align/*.bam
+     featureCounts -T 5 -t tRNA -g locus_tag \
+		  -a $PROJECT/reference_sequences/SA101588_prokka.gff\
+		  -o $PROJECT/rna_align/counttable_prokka_tRNAs.txt \
+		  $PROJECT/rna_align/*.bam
+    
+     
     
 }
 
@@ -51,7 +61,8 @@ align_rna_reads_genome(){
         # index BAM file:
         samtools index $DIR/$NAME.bam
         # generate coverage statistics with bamcoverage:
-        bamCoverage -b $DIR/$NAME.bam -o $DIR/$NAME.bw -bs 5
+        bamCoverage -b $DIR/$NAME.bam -o $DIR/$NAME.bw -bs 1
+
 	fastqc $i
 	rm $i
     done

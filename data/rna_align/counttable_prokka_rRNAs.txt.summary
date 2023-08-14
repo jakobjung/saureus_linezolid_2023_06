@@ -1,0 +1,15 @@
+Status	../data/rna_align/LND_0_rep1.fq.gz.bam	../data/rna_align/LND_0_rep2.fq.gz.bam	../data/rna_align/LND_0_rep3.fq.gz.bam	../data/rna_align/LND_16_rep1.fq.gz.bam	../data/rna_align/LND_16_rep2.fq.gz.bam	../data/rna_align/LND_16_rep3.fq.gz.bam	../data/rna_align/LND_8_rep1.fq.gz.bam	../data/rna_align/LND_8_rep2.fq.gz.bam	../data/rna_align/LND_8_rep3.fq.gz.bam
+Assigned	18801	24745	39378	7662	11436	24286	14731	7739	9918
+Unassigned_Unmapped	0	0	0	0	0	0	0	0	0
+Unassigned_Read_Type	0	0	0	0	0	0	0	0	0
+Unassigned_Singleton	0	0	0	0	0	0	0	0	0
+Unassigned_MappingQuality	0	0	0	0	0	0	0	0	0
+Unassigned_Chimera	0	0	0	0	0	0	0	0	0
+Unassigned_FragmentLength	0	0	0	0	0	0	0	0	0
+Unassigned_Duplicate	0	0	0	0	0	0	0	0	0
+Unassigned_MultiMapping	270376	296132	259397	175634	164336	126625	219557	154555	153017
+Unassigned_Secondary	0	0	0	0	0	0	0	0	0
+Unassigned_NonSplit	0	0	0	0	0	0	0	0	0
+Unassigned_NoFeatures	9909501	11460503	10796948	11067672	10445657	9682739	12561249	10339571	9556513
+Unassigned_Overlapping_Length	0	0	0	0	0	0	0	0	0
+Unassigned_Ambiguity	0	0	0	0	0	0	0	0	0

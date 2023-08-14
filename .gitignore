@@ -18,3 +18,8 @@
 *.html
 *.fai
 .idea*
+*.gff*
+*.fasta*
+*.svg
+*.png
+*.wig
