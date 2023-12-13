@@ -1,0 +1,986 @@
+---
+title: "RNA seq analysis resistant S. aureus"
+output: html_document
+author: "Jakob Jung"
+experiments: "Justin"
+date: "2023-08-14"
+---
+
+
+Import libraries:
+```{r, message=FALSE}
+library(edgeR)
+library(cowplot)
+library(circlize)
+library(dplyr)
+library(xlsx)
+library(ggplot2)
+library(ggpubr)
+library('RUVSeq')
+library(RColorBrewer)
+library(MetBrewer)
+library(EDASeq)
+library(ggrepel)
+library(viridis)
+library(svglite)
+library(ComplexHeatmap)
+library(tidyverse)
+library(grid)
+```
+
+# Mapping statistics
+
+## percentages of mapped read types
+Here I show the distribution of different reads (oligos, rRNA, tRNA) to get an idea on how the rRNA depletion worked out.
+First I import total counts per rRNA, mRNA and tRNA and look at the total counts of our ologos:
+```{r}
+# import:
+GenewiseCounts <- read.delim(
+  "./data/rna_align/counttable_prokka_new.txt",
+  sep = "\t", row.names = 1, header = T, comment.char = "#")
+dim(GenewiseCounts)
+head(GenewiseCounts)
+```
+
+I have to change column names, since they include the whole path:
+```{r}
+gwc <- GenewiseCounts[, 5:length(GenewiseCounts[1,])]
+pnapat <- ".*.rna_align\\.(.+)\\.fq\\.gz\\.bam"
+```
+
+save table with tpm normalized values for controls
+```{r}
+colnames(gwc) <- gsub(pnapat, "\\1", colnames(gwc))
+
+# remove hypothetical proteins:
+gwc <- gwc[!rownames(gwc) == "hypothetical protein",]
+
+# remove %[A-Z] from rownames
+rownames(gwc) <- gsub("%\\d[A-Z]+", "", rownames(gwc))
+rownames(gwc) <- gsub("%\\d[A-Z]+", "", rownames(gwc))
+rownames(gwc) <- gsub("%\\d[A-Z]+", "", rownames(gwc))
+rownames(gwc) <- gsub("%\\d[A-Z]+", "", rownames(gwc))
+
+
+# select controls:
+gene_lengths <- gwc$Length
+raw_counts <- gwc[, -1]
+norm_length <- data.frame(sapply(raw_counts, function(x) x / gene_lengths))
+tpm_matrix <- data.frame(sapply(norm_length, function(x) x * 1e6 / sum(x)), row.names = rownames(raw_counts))
+pairs(log(tpm_matrix))
+```
+
+
+
+create some length plot  etc.
+```{r}
+gwc_n <- gwc[, grepl("LND_0|Lengt", colnames(gwc))]
+raw_gwc <- data.frame(length = gwc_n$Length, counts = rowMeans(gwc_n[, -1]))
+
+gwcnorm_length <- data.frame(sapply(gwc_n[, -1], function(x) x / (gwc[, 1] / 1000)))
+gwc_tpm <- data.frame(Length = gwc_n$Length,
+                      sapply(gwcnorm_length, function(x) x * 1e6 / sum(x)), row.names = rownames(gwc_n))
+tpm <- data.frame(length = gwc_tpm$Length, counts = rowMeans(gwc_tpm[, -1]))
+
+lpt <- tpm %>% ggplot(aes(x = length, y = log10(counts + 1))) +
+  geom_point() +
+  scale_x_continuous(limits = c(0, 1000)) +
+  scale_y_continuous(limits = c(0, 5)) +
+  theme_minimal() +
+  geom_text_repel(aes(label = ifelse(length < 80, rownames(raw_gwc), "")), size = 2.5, max.overlaps = 15)
+
+lpr <- raw_gwc %>% ggplot(aes(x = length, y = log10(counts + 1))) +
+  geom_point() +
+  scale_x_continuous(limits = c(0, 1000)) +
+  scale_y_continuous(limits = c(-0.5, 5)) +
+  theme_minimal() +
+  geom_text_repel(aes(label = ifelse(length < 80, rownames(raw_gwc), "")), size = 2.5, max.overlaps = 15)
+
+svg("./analysis/coverage_etc/length_plot_raw.svg")
+print(lpr)
+dev.off()
+svg("./analysis/coverage_etc/length_plot_tpm_norm.svg")
+print(lpt)
+dev.off()
+```
+
+We can see that TPM normalization already works to take away the gene length effects on read depth.
+
+I also create a factor variable for groups of the sample data per condition:
+```{r}
+test <- as.factor(gsub("_rep\\d$", "", colnames(gwc)[-1]))
+test
+```
+
+
+## DE analysis
+Now that I have the read count dataframe with sample names, I import them into the edgeR environment:
+```{r}
+y <- DGEList(gwc[, -1], group = test, genes = gwc[, 1, drop = FALSE])
+options(digits = 3)
+head(y$samples)
+```
+
+
+## Filtering
+Now I want to filter out Genes which have very low counts across all libraries.
+I do this by creating a cutoff $$\frac {10} {L} $$
+where L is the minimum library size in millions. We delete genes that are below the cutoff in at least 2 libraries:
+```{r}
+L <- min(y$samples$lib.size) / 1000000
+cutoff <- 10 / L
+keep <- rowSums(cpm(y) > cutoff) >= 3
+table(keep)
+```
+I retain only the unfiltered genes,and delete 519 genes below the threshold:
+```{r}
+y <- y[keep, , keep.lib.sizes = FALSE]
+```
+
+## Design matrix
+I create a design matrix for the samples:
+```{r}
+batches <- as.factor(gsub(".*_rep(\\d)$", "\\1", colnames(y)))
+
+design <- model.matrix(~0 + test)
+colnames(design) <- c(levels(test))
+rownames(design) <- colnames(y$counts)
+design
+```
+
+
+
+## TMM normalization
+
+I check how the standard TMM normalization of edgeR performs. I start with calculating normalization factors:
+```{r, error=FALSE}
+y <- calcNormFactors(y)
+y <- estimateDisp(y, design, robust = T)
+```
+
+And now I create PCA and RLE plots:
+```{r}
+mycolors <- c(viridis(10, option = "inferno")[c(2, 5, 8)])
+#met.brewer("VanGogh3", direction = -1)[c(1, 3,4, 5, 7)])
+plotPCA(cpm(y), col = mycolors[test])
+plotRLE(cpm(y), outline = FALSE, ylim = c(-1, 1), col = mycolors[test],
+        main = "RLE", las = 2)
+```
+
+
+
+I see that one of the replicates (LND16 rep 3) is an outlier, so I use RUVSeq to account for this:
+
+
+## RUVs analysis:
+You can see that the TMM was succesful (TMM centers the RLE around 0) but there is an unwanted variation in some samples. so we try to run RUVSeq on only batch effects:
+```{r}
+set <- newSeqExpressionSet(as.matrix(y$counts),
+                           phenoData = data.frame(test, row.names = colnames(y$counts)))
+set <- betweenLaneNormalization(set, which = "median")
+
+plotRLE(set, outline = FALSE, col = mycolors[test])
+plotPCA(set, col = mycolors[test], cex = 1.2)
+```
+
+
+
+
+Now we do RUVs and create RLE and PCA plots again. We look at the plots for all different k using a loop (output not shown here):
+
+```{r, echo=T, results = 'hide'}
+for (k in 1:5) {
+  par(mfrow = c(1, 2))
+  set_RUVs <- RUVs(set, k = k, rownames(y), makeGroups(test))
+  plotRLE(set_RUVs, outline = FALSE, ylim = c(-1, 1), col = mycolors[test],
+          main = paste(c("k = ", k)))
+  plotPCA(set_RUVs, col = mycolors[test], cex = 1.2, main = paste(c("k = ", k)))
+}
+
+```
+
+K=3 seems to be the best fit, so we use that for the rest of the analysis.
+
+```{r}
+set_RUVs <- RUVs(set, k = 3, rownames(y), makeGroups(test))
+svg("./analysis/RLE_TMM_RUVs.svg", width = 15)
+par(mfrow = c(1, 2))
+plotRLE(cpm(y), col = mycolors[test],  main = "RLE (TMM)", ylim = c(-2, 2))
+plotRLE(set_RUVs, col = mycolors[test],ylim = c(-2, 2), main = "RLE (RUVs)")
+dev.off()
+```
+
+
+And now I create PCA and RLE plots in a nicer way:
+```{r}
+colors <- mycolors
+set_RUVs <- RUVs(set, k = 3, rownames(y), makeGroups(test))
+
+logCPM <- cpm(y, log = TRUE, prior.count = 2)
+logCPM_no_batch <- log(normCounts(set_RUVs) + 1)
+
+# PCA:
+pcasample <- t(logCPM_no_batch)
+
+# run pca. use normalization
+pca <- prcomp(pcasample)
+df_pca <- as.data.frame(pca$x)
+
+theme <- theme(panel.background = element_blank(), panel.border = element_rect(fill = NA),
+               panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+               strip.background = element_blank(),
+               axis.text = element_text(colour = "black", size = 12), axis.ticks = element_line(colour = "black"),
+               axis.title = element_text(colour = "black", size = 17),
+               plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+               plot.margin = unit(c(1, 1, 1, 1), "line"), legend.position = "none")
+
+percentage <- round(pca$sdev / sum(pca$sdev) * 100, 2)
+percentage <- paste(colnames(df_pca), "(", paste(as.character(percentage), "%", ")", sep = ""))
+
+df_pca$group <- test
+
+p <- ggplot(df_pca, aes(x = PC1, y = PC2, group = group, label = rownames(df_pca), colour = group))
+p <- p +
+  geom_point(size = 4) +
+  scale_shape_identity() +
+  geom_label_repel(size = 6, min.segment.length = 0, seed = 42, box.padding = 1, max.overlaps = 20) +
+  theme +
+  xlab(percentage[1]) +
+  ylab(percentage[2]) +
+  scale_color_manual(values = mycolors)
+p
+
+#for unnormalized stuff:
+pca_unnorm <- prcomp(t(logCPM))
+df_pca_unnorm <- as.data.frame(pca_unnorm$x)
+percentage_unnorm <- round(pca_unnorm$sdev / sum(pca_unnorm$sdev) * 100, 2)
+percentage_unnorm <- paste(colnames(df_pca_unnorm),
+                           "(", paste(as.character(percentage_unnorm), "%", ")", sep = ""))
+df_pca_unnorm$group <- test
+
+
+p_unnorm <- ggplot(df_pca_unnorm, aes(x = PC1, y = PC2, group = group, label = rownames(df_pca), colour = group))
+p_unnorm <- p_unnorm +
+  geom_point(size = 4) +
+  scale_shape_identity() +
+  geom_label_repel(size = 6, min.segment.length = 0, seed = 42, box.padding = 1, max.overlaps = 20) +
+  ggtitle("TMM normalized (no batch-effect removal)") +
+  theme +
+  xlab(percentage_unnorm[1]) +
+  ylab(percentage_unnorm[2]) +
+  scale_color_manual(values = mycolors)
+
+p_unnorm_norm <- ggarrange(p_unnorm, p + ggtitle("After removal of batch-effects (RUVs)"),
+                           ncol = 2, labels = c("A", "B"),
+                           font.label = list(size = 20, face = "bold"))
+
+# save pca as svg
+svg("./analysis/PCA_unnorm_norm.svg", width = 14)
+p_unnorm_norm
+dev.off()
+
+# save pca as svg
+svg("./analysis/PCA_after_be_removal.svg", width = 7)
+p
+dev.off()
+
+# save both as pdf
+pdf("./analysis/PCA_unnorm_norm.pdf", width = 14)
+p_unnorm_norm
+dev.off()
+
+# save both as pdf
+pdf("./analysis/PCA_after_be_removal.pdf", width = 7)
+p
+dev.off()
+
+```
+
+## DE analysis
+I chose RUVs k=4 as the PCA looks better here.
+
+Now that I have the read count dataframe with sample names, I import them into the edgeR environment:
+```{r}
+svg("./analysis/RLE_RUV_allsamples.svg")
+plotRLE(set_RUVs, outline = FALSE, col = colors[test])
+dev.off()
+
+y <- DGEList(counts = counts(set_RUVs), group = test)
+options(digits = 3)
+head(y$samples)
+
+
+# new design matrix:
+design <- model.matrix(~0 + test + W_1 + W_2 + W_3, data = pData(set_RUVs))
+colnames(design) <- c(levels(test), "W_1", "W_2", "W_3")
+rownames(design) <- colnames(y$counts)
+
+y <- calcNormFactors(y)
+y <- estimateDisp(y, design, robust = T)
+```
+
+
+I now make the contrasts:
+```{r}
+con <- makeContrasts( # LND_8 vs LND_0:
+  LND_8_vs_LND_0 = LND_8 - LND_0,
+  # LND_16 vs LND_0:
+  LND_16_vs_LND_0 = LND_16 - LND_0,
+  # LND_16 vs LND_8:
+  LND_16_vs_LND_8 = LND_16 - LND_8,
+  levels = design)
+
+fit <- glmQLFit(y, design, robust = TRUE)
+
+all_res <- list( # LND_8 vs LND_0:
+  LND_8_vs_LND_0 = glmQLFTest(fit, contrast = con[, 1]),
+  # LND_16 vs LND_0:
+  LND_16_vs_LND_0 = glmQLFTest(fit, contrast = con[, 2]),
+  # LND_16 vs LND_8:
+  LND_16_vs_LND_8 = glmQLFTest(fit, contrast = con[, 3]))
+
+
+all_res <- lapply(all_res, function(r) {
+  r$table$FDR <- p.adjust(r$table$PValue, method = "fdr")
+  r
+})
+
+```
+
+We now create MD, BCV and QLDisp plots to access qualiy of data:
+```{r}
+plotMD(y, main = "MD-plot")
+abline(h = 0, col = "red", lty = 2, lwd = 2)
+plotBCV(y)
+plotQLDisp(fit)
+```
+
+# get gene names etc:
+```{r}
+# load the annotation file (gff) as tibble. When importing, remove lines that start with #:
+gff <- read.delim("./data/reference_sequences/sa101588_prokka_sRNAs.gff", header = F, sep = "\t", comment.char = "#")
+# create a column with locus tags:
+gff$locus_tag <- gsub(".*locus_tag=([^; ]+).*", "\\1", gff$V9)
+# create a column with gene names (only if it matches the pattern, otherwise add the locus tag):
+gff$gene_name <- ifelse(grepl("gene=", gff$V9), gsub(".*gene=([^; ]+).*", "\\1", gff$V9),
+                        gff$locus_tag)
+# add a column with the product name (if found, otherwise add NA):
+gff$product <- ifelse(grepl("product=", gff$V9), gsub(".*product=([^; ]+).*", "\\1", gff$V9),
+                      NA)
+gff$product <- gsub("%2C", ",", gff$product)
+# get ec numbers:
+gff$ec <- ifelse(grepl("eC_number=", gff$V9), gsub(".*eC_number=([^;]+).*$", "\\1", gff$V9),
+                 NA)
+# get cog numbers:
+gff$cog <- ifelse(grepl("db_xref=", gff$V9), gsub(".*db_xref=([^;]+).*$", "\\1", gff$V9),
+                  NA)
+gff$cog <- gsub("COG:", "", gff$cog)
+# get gene length:
+gff$length <- gff$V5 - gff$V4 + 1
+
+gff <- gff %>%
+  mutate(strand = V7) %>%
+        # add type of feature:
+    mutate(type = V3) %>%
+  select(locus_tag, gene_name, type, product, ec, cog, length, strand)
+```
+Now I get the eggnogg resullts to add pathways etc to the table
+```{r}
+# read in the eggnogg results, ignore first 4 lines and use tab as separator and use the first row as column names:
+eggnogg <- read.delim("./data/eggnogg_results/eggnogg_results_saureus_lnz.tsv", skip = 4, sep = "\t", header = T)
+#View(eggnogg)
+
+# "query" column is the locus tag
+# add the eggnogg results to the gff table:
+annotations_genes <- left_join(gff, eggnogg, by = c("locus_tag" = "query"))
+# make NA from "-" in whole table
+annotations_genes[annotations_genes == "-"] <- NA
+# if theres a gene_name starting with "SA101588_00017" and it has an entry in "Preferred_name" then replace the
+# gene_name with the preferred name:
+annotations_genes$gene_name <- ifelse(grepl("SA101588_", annotations_genes$gene_name) &
+                                        !is.na(annotations_genes$Preferred_name),
+                                      annotations_genes$Preferred_name, annotations_genes$gene_name)
+# for all gene_names from "sRNA" type, replace the gene_name with the "product" name. If there is no product name,
+# keep same. rename the gene_name column entries if they occur more than once like _1, _2 etc:
+annotations_genes$gene_name <- ifelse(annotations_genes$type == "sRNA", annotations_genes$product,
+                                      annotations_genes$gene_name)
+annotations_genes$gene_name <- make.unique(annotations_genes$gene_name, sep = "_")
+```
+
+
+# volcano plots:
+create volcano plots for all organisms and all contrasts. save them as pdfs in the analysis folder.
+
+Tryout
+```{r}
+cols = c("target" = "darkorange", "marked_genes" = "steelblue", "up" = "darkorange",
+                                 "down" = "steelblue",
+                                "other" = "darkgrey")
+color_threshold_lines = "black"
+gene_names = NULL
+add_labels = T
+marked_genes = NULL
+minlogfc = 2
+title = NULL
+color_sig = T
+alpha = 0.01
+show_sig = T
+y_limit = 10
+x_limit = 4
+pointsize = 2
+targetgene = NULL
+```
+Create own function for volcano plot
+```{r}
+do_volcano <- function(restab, targetgene = NULL, pointsize = 2, x_limit = F, y_limit = F, show_sig = F,
+                       alpha = 0.05, color_sig = T, marked_gene_names = NULL, marked_gene_title = NULL,
+                       minlogfc = 1, title = "Volcano", marked_genes = NULL, add_labels = T, gene_names = NULL,
+                       color_threshold_lines = "black",
+                       cols = c("target" = "darkorange", "marked_genes" = "darkred", "up" = "darkorange",
+                                "down" = "steelblue",
+                                "other" = "darkgrey")) {
+  # change rownames of restab to gene_names if gen_names is not NULL:
+    if (!is.null(gene_names)) {
+        rownames(restab) <- gene_names
+    }
+  rownames(restab) <- gsub("^([^S][^A].+)" , "italic('\\1')" , rownames(restab))
+
+
+  g <- ggplot(restab) +
+    geom_point(
+      data = restab,
+      aes(x = logFC, y = -log10(FDR), fill = "other"),shape = 21, color="darkgrey",
+      cex = pointsize, alpha = 0.4
+    ) +
+    theme_bw() +
+    # change theme to standard black&wite.
+    geom_hline(yintercept = -log10(alpha),
+               color = color_threshold_lines, linetype = 3) +
+    geom_vline(xintercept = c(-minlogfc, minlogfc),
+               color = color_threshold_lines, linetype = 3) +
+    theme(axis.title.x = element_text(size = 15),
+          legend.position = "none",
+          axis.title.y = element_text(size = 15),
+          axis.text = element_text(size = 10, colour = "black"),
+          panel.background = element_rect(colour = "black"),
+          axis.line = element_line(colour = "black"),
+          panel.grid.minor.x = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          panel.grid.major.x = element_blank(), #element_line(colour="lightgrey", size=0.3),
+          panel.grid.major.y = element_blank(), #element_line(colour="lightgrey", size=0.3),
+          plot.title = element_text(hjust = 0.5, size = 15, face = "bold")) +
+    ggtitle(title) +
+    xlab(expression("log"[2] * " fold change")) +
+    ylab(expression("- log"[10] * " P-value (FDR)"))
+
+  if (x_limit) {
+    g <- g + scale_x_continuous(expand = c(0, 0), breaks = seq(-6, 6, 2), limits = c(-x_limit, x_limit))
+  }
+  if (y_limit) {
+    g <- g + scale_y_continuous(expand = c(0, 0), breaks = seq(0, 40, 5), limits = c(0, y_limit))
+  }
+
+  if (color_sig) {
+    g <- g +
+      geom_point(
+        data = restab[restab$FDR < alpha & restab$logFC < -minlogfc,],
+        aes(x = logFC, y = -log10(FDR), fill = "down"),alpha = 0.5,
+
+        cex = pointsize,shape=21) +
+      geom_point(
+        data = restab[restab$FDR < alpha & restab$logFC > minlogfc,],
+        aes(x = logFC, y = -log10(FDR), fill = "up"),alpha = 0.5,
+        cex = pointsize,shape=21)
+  }
+
+
+  if (!is.null(marked_genes)) {
+    marked_genes <- gsub("^([^S][^A].+)" , "italic('\\1')" , marked_genes)
+    g <- g + geom_point(
+      data = restab[marked_genes,],
+      aes(x = logFC, y = -log10(FDR), fill = "marked_genes"),
+      cex = pointsize , shape=21,alpha = 0.5)
+  }
+
+  # show the sign. genes:
+  # show the sigficantest genes:
+  if (show_sig) {
+    range01 <- function(x) { (x - min(x)) / (max(x) - min(x)) }
+    top_up <- restab[which(restab$FDR < alpha & restab$logFC > minlogfc),]
+    top_down <- restab[which(restab$FDR < alpha & restab$logFC < -(minlogfc)),]
+
+    if (length(rownames(top_up)) > 0 && (length(rownames(top_up)) > 3)) {
+      top_up <- top_up[order(-top_up$logFC),][1:10,]
+    }
+
+    if (length(rownames(top_down)) > 0 && (length(rownames(top_down)) > 3)) {
+      top_down <- top_down[order(top_down$logFC),][1:10,]
+
+    }
+
+    top_peaks <- rbind(top_up, top_down)
+    top_peaks <- na.omit(top_peaks)
+
+
+    g_labels <- c(targetgene, #marked_genes,
+                  rownames(top_peaks)[!grepl("SA101588_", rownames(top_peaks))])
+  }
+
+  # add labels:
+  if (add_labels == T) {
+    g_labels <- unique(g_labels)
+    rup <- restab[g_labels,][restab[g_labels,]$logFC > 0,]
+    rownames(rup) <- gsub("_\\d+$", "", rownames(rup))
+    g <- g + geom_text_repel(
+      data = rup,
+      aes(x = logFC, y = -log10(FDR), label = rownames(rup)),
+      nudge_x       = x_limit - rup$logFC,
+      min.segment.length = 0.1,
+      direction = "y",
+      hjust = 1,
+      size = 3,
+      segment.color = "black",
+      segment.alpha = 0.5,
+      parse = T)
+    # add labels for downregulated genes:
+    rdown <- restab[g_labels,][restab[g_labels,]$logFC < 0,]
+    rownames(rdown) <- gsub("_\\d+", "", rownames(rdown))
+    g <- g + geom_text_repel(
+      data = rdown,
+      aes(x = logFC, y = -log10(FDR), label = rownames(rdown)),
+      nudge_x       = -x_limit - rdown$logFC,
+      min.segment.length = 0.1,
+      direction = "y",
+      hjust = 0,
+      size = 3,
+      segment.color = "black",
+      segment.alpha = 0.5,
+      parse = T)
+  }
+  g + scale_color_manual(values = cols) + scale_fill_manual(values = cols)
+}
+```
+
+
+Create the volcano plots for the different results with the new function do_volcano
+```{r}
+# generate gene names from the annotation table for all the genes in the results
+all_locus_tags <- rownames(all_res$LND_8_vs_LND_0$table)
+
+# now generate the gene name for all the genes in the results
+all_gene_names <- annotations_genes[match(all_locus_tags, annotations_genes$locus_tag),]$gene_name
+# add sRNA genes as list
+sRNA_gene_names <- annotations_genes %>% filter(type == "sRNA") %>% filter(gene_name %in% all_gene_names) %>%
+        select(gene_name) %>% unlist()
+sRNA_locus_tags <- annotations_genes %>% filter(type == "sRNA") %>% filter(gene_name %in% all_gene_names) %>%
+        select(locus_tag) %>% unlist()
+
+# rename all gene names (remove srn_\d+_ from gene names)
+all_gene_names <- gsub("srn_\\d+_","", all_gene_names)
+sRNA_gene_names <- gsub("srn_\\d+_","", sRNA_gene_names)
+sRNA_locus_tags <- gsub("srn_\\d+_","", sRNA_locus_tags)
+
+# create empty list to fill with the volcano plots
+volc_list <- list()
+volc_list_srnas <- list()
+
+# use for loop to go through the different comparisons and create the volcano plots
+for (i in names(all_res)) {
+  restab <- all_res[[i]]$table
+  rownames(restab) <- gsub("srn_\\d+_","", rownames(restab))
+  ttle <- gsub("_", " ", i)
+  ttle <- gsub("vs", "vs.", ttle)
+  # make volcano plot
+  volc <- do_volcano(restab, pointsize = 2.5, x_limit = 7, y_limit = 15, show_sig = T,
+                     alpha = 0.01, color_sig = T, gene_names = all_gene_names, title = ttle,
+                     minlogfc = 2, add_labels = T, #marked_genes = sRNA_gene_names,
+                     color_threshold_lines = "black")
+  volc_list <- c(volc_list, list(volc))
+
+  # make volcano plot for sRNAs only
+  volc_srnas <- do_volcano(restab[rownames(restab) %in% sRNA_locus_tags,],
+                           pointsize = 3, x_limit = 4.5, y_limit = 15, show_sig = T,
+                       alpha = 0.01, color_sig = T, gene_names = sRNA_gene_names, title = ttle,
+                       minlogfc = 1.5, add_labels = T,
+                       color_threshold_lines = "black")
+  volc_list_srnas <- c(volc_list_srnas, list(volc_srnas))
+  # join annotations to restab by matching the gene names with the annotations table
+  restab$gene_name <- all_gene_names
+  restab <- left_join(restab, annotations_genes, by = c("gene_name" = "gene_name"))
+  # save the results table as excel file. make first line thicker, add gene names as first column
+  restab <- restab %>% mutate(gene_name = as.character(gene_name)) %>% select(gene_name, everything())
+  # sort restab by p-value starting with the smallest
+  restab <- restab[order(restab$PValue),]
+  # save the results table as excel file. make first line thicker
+  write.xlsx(restab, paste0("./analysis/DE_raw_data/", i, "_DE_result.xlsx"), row.names = F, col.names = T)
+  }
+# use cowplot to arrange the volcano plots in a grid
+volc_grid <- plot_grid(plotlist = volc_list, ncol = 3, nrow = 1,
+                       labels = c("A", "B", "C"), label_size = 20, scale=0.95)
+
+# save the grid as pdf
+ggsave("./analysis/volcanoplots/volcano_plots.pdf", volc_grid, width = 35, height = 12, units = "cm")
+# save grid as svg
+ggsave("./analysis/volcanoplots/volcano_plots.svg", volc_grid, width = 35, height = 12, units = "cm")
+
+# use cowplot to arrange the volcano plots of srnas in a grid
+volc_grid_srnas <- plot_grid(plotlist = volc_list_srnas, ncol = 3, nrow = 1,
+                       labels = c("A", "B", "C"), label_size = 20, scale=0.95)
+
+# save the grid as pdf
+ggsave("./analysis/volcanoplots/volcano_plots_srnas.pdf", volc_grid_srnas,
+       width = 35, height = 12, units = "cm")
+# save grid as svg
+ggsave("./analysis/volcanoplots/volcano_plots_srnas.svg", volc_grid_srnas,
+       width = 35, height = 12, units = "cm")
+
+```
+
+create a heatmap of the strongly differentially expressed genes
+```{r}
+# create a vector of top 10 upregulated and top 10 downregulated genes for each comparison
+top10_list <- list()
+for (i in names(all_res)) {
+  restab <- all_res[[i]]$table
+  # add gene names to restab
+  restab$gene_name <- all_gene_names
+  # sort restab by p-value starting with the smallest
+    restab <- restab[order(restab$PValue),]
+
+  # select the top upregulated and downregulated genes
+  top10 <- restab %>% filter(logFC > 2 & FDR < 0.01) %>% select(gene_name, logFC, FDR) #%>% head(10)
+  top10 <- rbind(top10, restab %>% filter(logFC < -2 & FDR < 0.01) %>% select(gene_name, logFC, FDR)) #%>% head(10))
+  top10_list <- c(top10_list, list(top10))
+}
+# make a vector of the gene names
+topdegenes <- c(top10_list[[1]]$gene_name, top10_list[[2]]$gene_name, top10_list[[3]]$gene_name)
+
+# get all logchanges in one df for three comparisons
+logchange <- data.frame(sapply(all_res, function(x) x$table$logFC),
+                                row.names = all_gene_names)
+# logchange of sRNAs
+logchange_srnas <- logchange[rownames(logchange) %in% sRNA_gene_names,]
+
+# select only the logchanges of the top 10 upregulated and top 10 downregulated genes
+logchange <- logchange %>% filter(rownames(.) %in% topdegenes)
+
+pvals <- data.frame(sapply(all_res, function(x) x$table$FDR),
+                            row.names = all_gene_names)%>% filter(rownames(.) %in% topdegenes)
+# sort logchange and pvals by P-value starting with the smallest
+logchange <- logchange[order(logchange[,1]),]
+pvals <- pvals[order(logchange[,1]),]
+
+# remove rows starting with "SA" in rownames
+logchange <- logchange[!grepl("^SA", rownames(logchange)),]
+pvals <- pvals[!grepl("^SA", rownames(pvals)),]
+
+# get a star for all entries of P-value < 0.01 and abs(logFC) > 2
+stars <- ifelse(pvals < 0.01 & abs(logchange) > 2, "*", "")
+
+colnames(logchange) <- c("LND  8 vs. LND 0", "LND 16 vs. LND 0", "LND 16 vs. LND 8")
+c1 <-  circlize::colorRamp2(c(-4, 0, 4), c("steelblue", "white", "darkorange"))
+ht4 <- Heatmap(t(logchange), name = "Log2 FC",
+               col = c1,
+               cluster_rows = F, cluster_columns = F, show_heatmap_legend = F,
+               cell_fun = function(j, i, x, y, width, height, fill) {
+                 grid.text(sprintf("%.1s", t(stars)[i, j]), x, y)
+               },
+               border = TRUE,
+               height = unit(2, "cm"), width = unit(40, "cm"),
+               column_names_gp = gpar(fontsize = 11),
+               column_names_rot = 45)
+ht4
+
+lgd2 <- Legend(col_fun = c1, title = expression("Log"[2]*" FC"), labels_gp = gpar(fontsize = 15),
+             title_gp = gpar(fontsize = 20),
+              grid_width =  unit(20, "cm"), grid_height = unit(1, "cm"),
+             at = c(-4, 0, 4), legend_width = unit(8, "cm"), direction = "horizontal",
+             labels = c("-4", "0", "4"), legend_height = unit(3, "cm"))
+
+svg("./analysis/heatmap_rnaseq.svg", height = 5, width = 20)
+print(ht4)
+draw(lgd2, x = unit(18, "cm"), y = unit(10, "cm"), just = c("left", "bottom"))
+dev.off()
+
+pdf("./analysis/heatmap_rnaseq.pdf", height = 5, width = 20)
+print(ht4)
+draw(lgd2, x = unit(18, "cm"), y = unit(10, "cm"), just = c("left", "bottom"))
+dev.off()
+
+
+
+```
+
+# sRNA heatmap
+```{r}
+# now do same for sRNAs
+logchange_srnas <- logchange_srnas[order(logchange_srnas[,1]),]
+
+# get p-values for sRNAs
+pvals_srnas <- data.frame(sapply(all_res, function(x) x$table$FDR),
+                          row.names = all_gene_names)%>% filter(rownames(.) %in% sRNA_gene_names)
+
+# order pvals by logFC (same as logcjhange)
+pvals_srnas <- pvals_srnas[rownames(logchange_srnas),]
+
+# only select rows if at least one of the abs(logFCs) is > 1 and p-value < 0.01
+logchange_srnas <- logchange_srnas[apply(abs(logchange_srnas) > 1.5 & pvals_srnas < 0.01, 1, any),]
+pvals_srnas <- pvals_srnas[rownames(logchange_srnas),]
+
+# get a star for all entries of P-value < 0.01 and abs(logFC) > 1
+stars_srnas <- ifelse(pvals_srnas < 0.01 & abs(logchange_srnas) > 1.5, "*", "")
+
+colnames(logchange_srnas) <- c("LND  8 vs. LND 0", "LND 16 vs. LND 0", "LND 16 vs. LND 8")
+c1 <-  circlize::colorRamp2(c(-4, 0, 4), c("steelblue", "white", "darkorange"))
+
+ht_srnas <- Heatmap(t(logchange_srnas), name = "Log2 FC",
+               col = c1,
+               cluster_rows = F, cluster_columns = F, show_heatmap_legend = F,
+               cell_fun = function(j, i, x, y, width, height, fill) {
+                 grid.text(sprintf("%.1s", t(stars_srnas)[i, j]), x, y)
+               },
+               border = TRUE,
+               height = unit(3, "cm"), width = unit(20, "cm"),
+               column_names_gp = gpar(fontsize = 13),
+               column_names_rot = 45)
+ht_srnas
+
+lgd_srnas <- Legend(col_fun = c1, title = expression("Log"[2]*" FC"), labels_gp = gpar(fontsize = 15),
+             title_gp = gpar(fontsize = 20),
+              grid_width =  unit(20, "cm"), grid_height = unit(1, "cm"),
+             at = c(-4, 0, 4), legend_width = unit(8, "cm"), direction = "horizontal",
+             labels = c("-4", "0", "4"), legend_height = unit(3, "cm"))
+
+svg("./analysis/heatmap_rnaseq_srnas.svg", height = 5, width = 10)
+print(ht_srnas)
+draw(lgd_srnas, x = unit(9, "cm"), y = unit(10, "cm"), just = c("left", "bottom"))
+dev.off()
+
+pdf("./analysis/heatmap_rnaseq_srnas.pdf", height = 5, width = 10)
+print(ht_srnas)
+draw(lgd_srnas, x = unit(9, "cm"), y = unit(10, "cm"), just = c("left", "bottom"))
+dev.off()
+```
+
+
+# kegg pathway analysis
+```{r}
+library(KEGGREST)
+
+# get kegg pathways for staphylococcus aureus (sau)
+list_kegg <- keggList("pathway", organism = "sau")
+
+kegg_pw_ids <- names(list_kegg)
+
+# get link to locus tags
+sau_genes <- keggLink("sau", "pathway")
+sau_genes <- gsub("sau:", "", sau_genes)
+
+# now substitute our locus tags with according N315 locus tags
+# import portho output first:
+portho <- read.table("./data/reference_sequences/proteinortho_SA.tsv",
+                     sep = "\t", header = T)
+portho <- portho %>% mutate(SAN315 = gsub("\\([+-]\\)", "", SAN315_curated_for_portho.fasta)) %>%
+        # remove SAN315 entries longer thhan 7 characters
+          filter(nchar(SAN315) < 8) %>%
+        mutate(SA101588 = SA101588.ffn) %>% select(SAN315, SA101588)
+
+# now substitute our locus tags with according N315 locus tags by matching sau_genes with the SAN315 column of portho and replacing it with the SA101588 column
+sau_genes <- sau_genes[sau_genes %in% portho$SAN315]
+link_kegg <- portho$SA101588[match(sau_genes, portho$SAN315)]
+names(link_kegg) <- names(sau_genes)
+# reverse the names and values of link_kegg
+link_kegg <- setNames(names(link_kegg), link_kegg)
+
+```
+```{r}
+link_kegg <- link_kegg[names(link_kegg) %in% rownames(all_res$LND_16_vs_LND_0$table)] #remove genes not in data
+link_kegg <- gsub("path:", "", link_kegg) # remove "path:" from kegg_pw_ids
+
+idx_kegg <- sapply(kegg_pw_ids, function(x){
+  x <- unique(names(link_kegg[link_kegg == x])) # choose all genes, except duplucates
+})
+
+```
+
+
+```{r}
+l <- length(colnames(con))
+kegg_fry <- lapply(1:l, function(x) fry(y,idx_kegg, design, con[,x]))
+names(kegg_fry) <- colnames(con)
+```
+
+
+add KEGG terms:
+```{r}
+for (fryres in names(kegg_fry)) {
+  kegg_fry[[fryres]][["TERM"]] <- list_kegg[rownames(kegg_fry[[fryres]])]
+  kegg_fry[[fryres]][["TERM"]] <- gsub("(.*) - Staphylococcus aureus subsp. aureus N315 \\(MRSA\\/VSSA\\)",
+                                            "\\1", kegg_fry[[fryres]][["TERM"]])
+  write.csv(kegg_fry[[fryres]], paste("./analysis/pathway_analysis/", fryres, ".csv", sep = ""))
+}
+
+
+kegg_frysig <- lapply(kegg_fry, function(x) x[x[["FDR"]]<0.05 & x[["NGenes"]]>5,])
+kegg_siggos <- c()
+
+
+for (i in names(kegg_frysig)) {
+  print(i)
+  print(dim(kegg_frysig[[i]]))
+  print(kegg_frysig[[i]][,c(1,2,4,7)])
+  kegg_siggos <- c(kegg_siggos, rownames(kegg_frysig[[i]]))#[1:10,]))  # can be modified
+}
+
+kegg_siggos <- unique(kegg_siggos[!grepl("NA", kegg_siggos)])
+```
+
+Create a heatmap-df  for KEGG:
+```{r}
+idx_kegg_char <- lapply(idx_kegg, as.character)
+
+
+# I create a dataframe with mean logFC values for each significant GO-term:
+hm_kegg <- t(as.data.frame(lapply(idx_kegg_char[kegg_siggos], function(x){
+  sapply(names(all_res), function(y){
+    mean(all_res[[y]]$table[x,]$logFC)
+  })
+})))
+
+hm_kegg <- as.data.frame(hm_kegg)
+
+```
+make heatmap:
+```{r}
+hm_kegg <- hm_kegg[order(hm_kegg[,1], decreasing = T),]
+
+kegg_sizes <- sapply(idx_kegg_char[rownames(hm_kegg)], function(x) length(x))
+
+pvals <- data.frame(sapply(names(kegg_fry),
+                           function(x) kegg_fry[[x]][rownames(hm_kegg),"FDR"]),
+                    row.names = rownames(hm_kegg))
+
+#select only significant ones:
+pvals <-sapply(pvals, function(x) ifelse(x<0.05, x <- "*", x<-"") )
+
+keggpws <- kegg_fry$LND_16_vs_LND_0[rownames(hm_kegg),] [["TERM"]]
+
+
+rownames(hm_kegg) <- ifelse(!is.na(keggpws),keggpws, rownames(hm_kegg) )
+```
+
+plot hm (save as pdf):
+```{r}
+col_fun = colorRamp2(c(-1,0, 1), c("steelblue", "white", "darkorange"))
+
+
+ht_vert <- Heatmap(t(hm_kegg), cluster_rows = F, cluster_columns = F,
+               name = "GO-analysis", col = col_fun,
+               show_heatmap_legend = F,
+               row_title_side = "right", row_title_rot = 0,
+               border = TRUE,
+               cell_fun = function(j, i, x, y, width, height, fill) {
+                 grid.text(sprintf("%.1s", t(pvals)[i, j]), x, y)
+               },
+               column_names_gp = gpar(fontsize = 11),
+               #column_names_rot = 45,
+               row_names_gp = gpar(fontsize = 10),
+               row_title = NULL,
+               width = unit(30, "cm"), height = unit(2, "cm"),
+               top_annotation  = columnAnnotation("# genes" = anno_barplot(kegg_sizes)))
+
+ht_vert
+
+lgd = Legend(col_fun = col_fun, title = expression("mean log"[2]*" FC"), #direction = "horizontal",
+             title_gp = gpar(fontsize = 12), labels = c("-1", " 0"," 1"), legend_height = unit(3, "cm"),
+             at = c(-1, 0, 1), border = "black",
+             title_position = "leftcenter-rot")
+draw(lgd)
+
+svg("./analysis/pathway_analysis/hm_KEGG.svg", width = unit(17, "cm"),  height = unit(6, "cm"))
+draw(ht_vert)
+draw(lgd, x = unit(1, "cm"), y = unit(8, "cm"), just = c("left", "bottom"))
+dev.off()
+```
+
+
+get srnas and create a gff file for them:
+```{r}
+gff <- read.delim("./data/reference_sequences/sa101588_prokka_sRNAs.gff", header = F, sep = "\t", comment.char = "#")
+# create a column with locus tags:
+gff$locus_tag <- gsub(".*locus_tag=([^; ]+).*", "\\1", gff$V9)
+# create a column with gene names (only if it matches the pattern, otherwise add the locus tag):
+gff$gene_name <- ifelse(grepl("gene=", gff$V9), gsub(".*gene=([^; ]+).*", "\\1", gff$V9),
+                        gff$locus_tag)
+# add a column with the product name (if found, otherwise add NA):
+gff$product <- ifelse(grepl("product=", gff$V9), gsub(".*product=([^; ]+).*", "\\1", gff$V9),
+                      NA)
+gff$product <- gsub("%2C", ",", gff$product)
+
+
+# get significant sRNAs
+sig_sRNAs <- rownames(logchange_srnas)
+
+
+# get all sRNAs from the annotation table
+gff_srnas <- gff %>% filter(V3 == "sRNA") %>%
+        # exreact srn_\\d+_ from product
+          mutate(product = gsub("srn_\\d+_","", product)) %>%
+        mutate(product = make.unique(product, sep="_")) %>%
+        # keep only the sRNAs that are in the significant sRNAs
+          filter(product %in% sig_sRNAs) %>%
+        # select V1-V9, but instead of V3 use the product name
+          select(V1, V2, product, V4, V5, V6, V7, V8, V9)
+
+# do same for all sRNAs:
+gff_all_srnas <- gff %>% filter(V3 == "sRNA") %>%
+        # exreact srn_\\d+_ from product
+          mutate(product = gsub("srn_\\d+_","", product)) %>%
+        mutate(product = make.unique(product, sep="_")) %>%
+        # select V1-V9, but instead of V3 use the product name
+          select(V1, V2, product, V4, V5, V6, V7, V8, V9)
+
+# save gff_srnas, with no header and no rownames
+write.table(gff_srnas, "./data/intarna_prediction/srna_sign.gff3",
+            sep = "\t", quote = F, row.names = F, col.names = F)
+
+# save gff_all_srnas, with no header and no rownames
+write.table(gff_all_srnas, "./data/intarna_prediction/srna_all.gff3",
+            sep = "\t", quote = F, row.names = F, col.names = F)
+
+# do the same for all cds, trnas and rrnas
+transcripts <- gff %>% filter(V3 %in% c("CDS", "tRNA", "rRNA"))  %>%
+        # make transcripts of cds include +30 and -30 bp
+          mutate(V4 = ifelse(V3 == "CDS", V4 - 30, V4)) %>%
+          mutate(V5 = ifelse(V3 == "CDS", V5 + 30, V5)) %>%
+        # make V4 0 if it is < 0
+          mutate(V4 = ifelse(V4 < 1, 1, V4)) %>%
+        # select V1-V9, but instead of V3 use the product name
+          select(V1, V2, gene_name, V4, V5, V6, V7, V8, V9)
+
+# save transcripts as gff, with no header and no rownames
+write.table(transcripts, "./data/intarna_prediction/cds_srna_trna.gff3",
+            sep = "\t", quote = F, row.names = F, col.names = F)
+
+# do the same for all cds, trnas and rrnas
+transcripts_starts <- gff %>% filter(V3 %in% c("CDS", "tRNA", "rRNA"))  %>%
+        # make transcripts of cds include -50 and the first 50 bases of cdss. if cds is on - strand, then the first 50 bases are the last 50 bases of the cds. strand is in V7
+          mutate(V4 = ifelse(V3 == "CDS" & V7 == "+", V4 - 50, V4)) %>%
+          mutate(V5 = ifelse(V3 == "CDS" & V7 == "+", V4 + 100, V5)) %>%
+          mutate(V4 = ifelse(V3 == "CDS" & V7 == "-", V5 - 50, V4)) %>%
+          mutate(V5 = ifelse(V3 == "CDS" & V7 == "-", V4 + 100, V5)) %>%
+        # make V4 0 if it is < 0
+          mutate(V4 = ifelse(V4 < 1, 1, V4)) %>%
+        # select V1-V9, but instead of V3 use the product name
+          select(V1, V2, gene_name, V4, V5, V6, V7, V8, V9)
+
+# save transcripts as gff, with no header and no rownames
+write.table(transcripts_starts, "./data/intarna_prediction/cds_srna_trna_starts.gff3",
+            sep = "\t", quote = F, row.names = F, col.names = F)
+
+```
+
+
+
+
+

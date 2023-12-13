@@ -20,3 +20,28 @@ Then I ran the R-script to merge srna annotations.
 R add_sRNAs_to_gff.R
 ```
 
+
+
+### curate N315 and do proteinortho
+
+```bash
+grep "ORFID:" SAN315.gff3 | sed -E "s/(.*\t)CDS(\t.*ORFID:([^;%]+).*)/\\1\\3\\2/" | head -n 100 > SAN315_curated_for_portho.gff
+
+bedtools getfasta -nameOnly -s -fo SAN315_curated_for_portho.fasta -fi genome_N315.fasta -bed SAN315_curated_for_portho.gff
+```
+
+run protho:
+
+```bash
+proteinortho6.pl --project=portho ./SAN315_curated_for_portho.portho.fasta ./SA101588.ffn --p=blastn 
+```
+
+
+
+## combine sRNAs:
+
+```
+grep -P "\tsRNA" SA101588_prokka.gff  >> sRNAs_combined.gff 
+grep -P "\tsRNA" WG_with_sRNAs_Staphylococcus_aureus_101588.gff3  >> sRNAs_combined.gff
+```
+
